@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 
 def calculate_debts(file_name):
@@ -27,7 +28,7 @@ def calculate_debts(file_name):
 
     # Consolidate debts
     final_debts = {}
-    for (debtor, creditor), amount in   debts.items():
+    for (debtor, creditor), amount in debts.items():
         if (creditor, debtor) in final_debts:
             final_debts[(creditor, debtor)] -= amount
             if final_debts[(creditor, debtor)] < 0:
@@ -39,8 +40,25 @@ def calculate_debts(file_name):
     return final_debts
 
 def main():
-    file_name = "Test.xlsx"
+    # Get a list of all .xlsx files in the current directory
+    files = [f for f in os.listdir() if f.endswith('.xlsx')]
+
+    # If there are no .xlsx files, print a message and return
+    if not files:
+        print("No .xlsx files found in the current directory.")
+        return
+
+    # Print the available files
+    for i, file in enumerate(files, start=1):
+        print(f"{i}. {file}")
+
+    # Ask the user to select a file
+    file_number = int(input("Please enter the number of the file you want to select: ")) - 1
+    file_name = files[file_number]
+
+    # Calculate and print the debts
     debts = calculate_debts(file_name)
+    print("")
     for people, amount in debts.items():
         print(f"{people[0]} owes {people[1]} {amount:.2f},-")
 
