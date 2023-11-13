@@ -28,8 +28,10 @@ def get_person_names(size):
 def create_expense_template(doc_name, people_names):
     data = {'Paying person': [], 'Description': [], 'Amount': [], 'Shared with': []}
     
+    num_blank_lines = 10
+
     # Add 10 blank lines
-    for _ in range(10):
+    for _ in range(num_blank_lines):
         data['Paying person'].append('')
         data['Description'].append('')
         data['Amount'].append('')
@@ -51,7 +53,7 @@ def create_expense_template(doc_name, people_names):
     sheet = book.active
     dv = DataValidation(type="list", formula1=f'"{", ".join(people_names)}"', allow_blank=True)
     sheet.add_data_validation(dv)
-    dv.add(f'A2:A{len(people_names)+1}')  # Assuming A is the column for "Paying person"
+    dv.add(f'A2:A{num_blank_lines + 1}') # Add 1 because of the header
     
     # Set the width of the columns
     for i, column_cells in enumerate(sheet.columns):
