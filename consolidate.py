@@ -58,9 +58,25 @@ def main():
 
     # Calculate and print the debts
     debts = calculate_debts(file_name)
+
+    # Sort the debts by amount owed
+    sorted_debts = sorted(debts.items(), key=lambda x: x[1], reverse=True)
+
+    # Group the debts by debtor
+    grouped_debts = {}
+    for people, amount in sorted_debts:
+        debtor = people[0]
+        if debtor not in grouped_debts:
+            grouped_debts[debtor] = []
+        grouped_debts[debtor].append((people[1], amount))
+
+    # Print the debts
     print("")
-    for people, amount in debts.items():
-        print(f"{people[0]} owes {people[1]} {amount:.2f},-")
+    for debtor, debts in grouped_debts.items():
+        print(f"{debtor} owes:")
+        for creditor, amount in debts:
+            print(f"  {creditor}: {amount:.2f},-")
+        print("")
 
 if __name__ == "__main__":
     main()
