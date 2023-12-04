@@ -1,5 +1,19 @@
 import os
 import pandas as pd
+import requests
+
+def convert_to_dkk(amount, currency):
+    # Make a request to the API
+    response = requests.get("https://open.er-api.com/v6/latest/DKK")
+    data = response.json()
+
+    # Get the exchange rate for the given currency
+    exchange_rate = data['rates'][currency]
+
+    # Convert the amount to DKK
+    amount_in_dkk = amount / exchange_rate
+
+    return amount_in_dkk
 
 def calculate_debts(file_name):
     # Read the Excel file
@@ -16,7 +30,7 @@ def calculate_debts(file_name):
         shared_with = row['Shared with'].split(', ')
 
         # Calculate the amount each person owes for this expense
-        owed_amount = amount / len(shared_with)
+        owed_amount = convert_to_dkk(amount, row['Currency']) / len(shared_with)
 
         # Update the debts
         for person in shared_with:

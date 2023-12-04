@@ -25,7 +25,7 @@ def get_person_names(size):
     return names
 
 def get_default_currency():
-    return input("Enter the default currency code (e.g., EUR): ")
+    return input("Enter the default currency code (e.g. DKK or EUR): ")
 
 def create_expense_template(doc_name, people_names, default_currency):
     data = {'Paying person': [], 'Description': [], 'Amount': [], 'Currency': [], 'Shared with': []}
