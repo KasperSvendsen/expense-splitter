@@ -2,95 +2,178 @@ import os
 import pandas as pd
 import requests
 
-def convert_to_dkk(amount, currency):
-    # Make a request to the API
-    response = requests.get("https://open.er-api.com/v6/latest/DKK")
-    data = response.json()
+# Function to convert a given amount to DKK using exchange rates
+def convert_to_dkk(amount, currency, exchange_rates):
+    if currency == 'DKK':
+        return amount
+    try:
+        exchange_rate = exchange_rates.get(currency)
+        if exchange_rate is None:
+            print(f"Exchange rate for {currency} not found.")
+            return None
+        amount_in_dkk = amount / exchange_rate
+        return amount_in_dkk
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None
 
-    # Get the exchange rate for the given currency
-    exchange_rate = data['rates'][currency]
-
-    # Convert the amount to DKK
-    amount_in_dkk = amount / exchange_rate
-
-    return amount_in_dkk
-
-def calculate_debts(file_name):
-    # Read the Excel file
+# Function to load and preprocess data from an Excel file
+def load_and_preprocess_data(file_name):
     df = pd.read_excel(file_name)
+    df['Paying person'] = df['Paying person'].str.strip()
+    df['Shared with'] = df['Shared with'].apply(lambda x: [person.strip() for person in x.split(', ')])
 
-    # Initialize a dictionary to store the debts
-    debts = {}
+    # Convert 'Amount' column to float to avoid dtype issues
+    df['Amount'] = df['Amount'].astype(float)
 
-    # Iterate over the rows of the DataFrame
+    # Fetch the exchange rates once
+    try:
+        response = requests.get("https://open.er-api.com/v6/latest/DKK")
+        if response.status_code != 200:
+            print("Error fetching exchange rates. Please try again later.")
+            return df
+        data = response.json()
+        exchange_rates = data['rates']
+    except Exception as e:
+        print(f"An error occurred while fetching exchange rates: {e}")
+        return df
+
+    # Convert non-DKK currencies to DKK for all relevant columns
+    for index, row in df.iterrows():
+        if row['Currency'] != 'DKK':
+            # Convert the main amount
+            converted_amount = convert_to_dkk(row['Amount'], row['Currency'], exchange_rates)
+            if converted_amount is not None:
+                df.at[index, 'Amount'] = float(round(converted_amount, 2))  # Cast to float and round to 2 decimal places
+
+            # Convert each person's share
+            for person in row['Shared with']:
+                share_column = f"{person}'s share"
+                if share_column in df.columns and pd.notna(row[share_column]):
+                    converted_share = convert_to_dkk(row[share_column], row['Currency'], exchange_rates)
+                    if converted_share is not None:
+                        df.at[index, share_column] = float(round(converted_share, 2))  # Cast to float and round
+
+            df.at[index, 'Currency'] = 'DKK'
+
+    return df
+
+# Function to calculate the total expenses paid by each individual
+def calculate_individual_expenses(df):
+    individual_expenses = {}
     for _, row in df.iterrows():
-        # Get the paying person, amount, and the people with whom the expense is shared
-        paying_person = row['Paying person']
+        payer = row['Paying person']
+        amount = row['Amount']  # Assumed to be in DKK after preprocessing
+        individual_expenses[payer] = round(individual_expenses.get(payer, 0) + amount, 2)
+    return individual_expenses
+
+# Function to calculate the total shares owed by each individual
+def calculate_total_shares(df):
+    total_shares = {}
+    for _, row in df.iterrows():
+        shared_with = row['Shared with']
         amount = row['Amount']
-        shared_with = row['Shared with'].split(', ')
+        explicit_shares_provided = False
+        total_explicit_shares = 0
 
-        # Calculate the amount each person owes for this expense
-        owed_amount = convert_to_dkk(amount, row['Currency']) / len(shared_with)
-
-        # Update the debts
+        # First, use specific shares if provided
         for person in shared_with:
-            if person != paying_person:
-                if (person, paying_person) not in debts:
-                    debts[(person, paying_person)] = owed_amount
-                else:
-                    debts[(person, paying_person)] += owed_amount
+            share_column = f"{person}'s share"
+            if share_column in df.columns and pd.notna(row[share_column]):
+                share = row[share_column]
+                total_shares[person] = total_shares.get(person, 0) + share
+                total_explicit_shares += share
+                explicit_shares_provided = True
 
-    # Consolidate debts
-    final_debts = {}
-    for (debtor, creditor), amount in debts.items():
-        if (creditor, debtor) in final_debts:
-            final_debts[(creditor, debtor)] -= amount
-            if final_debts[(creditor, debtor)] < 0:
-                final_debts[(debtor, creditor)] = -final_debts[(creditor, debtor)]
-                del final_debts[(creditor, debtor)]
-        else:
-            final_debts[(debtor, creditor)] = amount
+        # If the expense is not fully covered by specific shares, divide the remainder equally
+        if not explicit_shares_provided:
+            equal_share = amount / len(shared_with)
+            for person in shared_with:
+                total_shares[person] = total_shares.get(person, 0) + equal_share
+        elif total_explicit_shares < amount:
+            remainder = amount - total_explicit_shares
+            equal_share = remainder / (len(shared_with) - sum(1 for person in shared_with if f"{person}'s share" in df.columns and pd.notna(row[share_column])))
+            for person in shared_with:
+                if f"{person}'s share" not in df.columns or pd.isna(row[share_column]):
+                    total_shares[person] = total_shares.get(person, 0) + equal_share
 
-    return final_debts
+    return total_shares
 
-def main():
-    # Get a list of all .xlsx files in the current directory
+# Function to calculate the net balance for each individual
+def calculate_net_balances(individual_expenses, total_shares):
+    net_balances = {}
+    for person in set(individual_expenses.keys()).union(set(total_shares.keys())):
+        paid_amount = individual_expenses.get(person, 0)
+        share_amount = total_shares.get(person, 0)
+        net_balances[person] = round(paid_amount - share_amount, 2)
+    return net_balances
+
+# Function to simplify debts between individuals
+def simplify_debts(net_balances):
+    # Create a list to store simplified debts
+    simplified_debts = []
+
+    # Create two lists to store people who owe money (debtors) and who are owed money (creditors)
+    debtors = [(person, -balance) for person, balance in net_balances.items() if balance < 0]
+    creditors = [(person, balance) for person, balance in net_balances.items() if balance > 0]
+
+    # Iterate until all debts are settled
+    while debtors and creditors:
+        debtor, debt_amount = debtors.pop(0)
+        creditor, credit_amount = creditors.pop(0)
+
+        # Determine the transaction amount
+        transaction_amount = min(debt_amount, credit_amount)
+        simplified_debts.append((debtor, creditor, transaction_amount))
+
+        # Update remaining amounts
+        debt_amount -= transaction_amount
+        credit_amount -= transaction_amount
+
+        # Re-add debtor or creditor to the list if they still owe money or are still owed money
+        if debt_amount > 0:
+            debtors.insert(0, (debtor, debt_amount))
+        if credit_amount > 0:
+            creditors.insert(0, (creditor, credit_amount))
+
+    return simplified_debts
+
+# Function to select an Excel file for processing
+def select_file():
     files = [f for f in os.listdir() if f.endswith('.xlsx')]
-
-    # If there are no .xlsx files, print a message and return
     if not files:
         print("No .xlsx files found in the current directory.")
-        return
-
-    # Print the available files
+        return None
     for i, file in enumerate(files, start=1):
         print(f"{i}. {file}")
-
-    # Ask the user to select a file
     file_number = int(input("Please enter the number of the file you want to select: ")) - 1
-    file_name = files[file_number]
+    return files[file_number]
 
-    # Calculate and print the debts
-    debts = calculate_debts(file_name)
+# Main function to execute the script
+def main():
+    file_name = select_file()
+    if file_name is None:
+        return
 
-    # Sort the debts by amount owed
-    sorted_debts = sorted(debts.items(), key=lambda x: x[1], reverse=True)
+    df = load_and_preprocess_data(file_name)
+    individual_expenses = calculate_individual_expenses(df)
+    total_shares = calculate_total_shares(df)
+    net_balances = calculate_net_balances(individual_expenses, total_shares)
+    simplified_debts = simplify_debts(net_balances)
 
-    # Group the debts by debtor
-    grouped_debts = {}
-    for people, amount in sorted_debts:
-        debtor = people[0]
-        if debtor not in grouped_debts:
-            grouped_debts[debtor] = []
-        grouped_debts[debtor].append((people[1], amount))
+    print("\nNet Balances in DKK:")
+    for person, balance in net_balances.items():
+        if balance > 0:
+            print(f"{person} is owed {balance} DKK")
+        elif balance < 0:
+            print(f"{person} owes {-balance} DKK")
+        else:
+            print(f"{person} is settled up")
 
-    # Print the debts
-    print("")
-    for debtor, debts in grouped_debts.items():
-        print(f"{debtor} owes:")
-        for creditor, amount in debts:
-            print(f"  {creditor}: {amount:.2f},-")
-        print("")
+    # Print simplified debts
+    print("\nSimplified Debts:")
+    for debtor, creditor, amount in simplified_debts:
+        print(f"{debtor} owes {creditor} {amount:.2f} DKK")
 
 if __name__ == "__main__":
     main()
