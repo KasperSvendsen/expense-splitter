@@ -2,6 +2,8 @@ import os
 import pandas as pd
 import requests
 import numpy as np
+import sys
+from datetime import datetime
 
 # Function to convert a given amount to DKK using exchange rates
 def convert_to_dkk(amount, currency, exchange_rates):
@@ -87,12 +89,30 @@ def calculate_individual_expenses(df):
             individual_expenses[payer] = round(individual_expenses.get(payer, 0) + amount, 2)
     return individual_expenses
 
+# Track payments for each person
+def track_person_payments(df):
+    person_payments = {}
+    for _, row in df.iterrows():
+        payer = row['Paying person']
+        amount = row['Amount']
+        description = row['Description'] if 'Description' in row else 'Unnamed item'
+        
+        if payer not in person_payments:
+            person_payments[payer] = []
+        
+        person_payments[payer].append((description, amount))
+    
+    return person_payments
+
 # Function to calculate the total shares owed by each individual
 def calculate_total_shares(df):
     total_shares = {}
+    personal_item_costs = {}  # Track costs by person and item
+    
     for _, row in df.iterrows():
         shared_with = row['Shared with']
         amount = row['Amount']
+        description = row['Description'] if 'Description' in row else 'Unnamed item'
         
         # Skip if shared_with is empty
         if not shared_with:
@@ -109,12 +129,23 @@ def calculate_total_shares(df):
                 total_shares[person] = total_shares.get(person, 0) + share
                 total_explicit_shares += share
                 explicit_shares_provided = True
+                
+                # Track this specific item cost for the person
+                if person not in personal_item_costs:
+                    personal_item_costs[person] = []
+                personal_item_costs[person].append((description, share, amount))
 
         # If the expense is not fully covered by specific shares, divide the remainder equally
         if not explicit_shares_provided:
             equal_share = amount / len(shared_with)
             for person in shared_with:
                 total_shares[person] = total_shares.get(person, 0) + equal_share
+                
+                # Track this equal share item cost for the person
+                if person not in personal_item_costs:
+                    personal_item_costs[person] = []
+                personal_item_costs[person].append((description, equal_share, amount))
+                
         elif total_explicit_shares < amount:
             # Count people without explicit shares
             people_without_shares = sum(1 for person in shared_with if 
@@ -130,8 +161,13 @@ def calculate_total_shares(df):
                     share_column = f"{person}'s share"
                     if share_column not in df.columns or pd.isna(row[share_column]):
                         total_shares[person] = total_shares.get(person, 0) + equal_share
+                        
+                        # Track this remainder share item cost for the person
+                        if person not in personal_item_costs:
+                            personal_item_costs[person] = []
+                        personal_item_costs[person].append((description, equal_share, amount))
 
-    return total_shares
+    return total_shares, personal_item_costs
 
 # Function to calculate the net balance for each individual
 def calculate_net_balances(individual_expenses, total_shares):
@@ -153,6 +189,10 @@ def simplify_debts(net_balances):
     debtors = [(person, -balance) for person, balance in net_balances.items() if balance < 0]
     creditors = [(person, balance) for person, balance in net_balances.items() if balance > 0]
 
+    # Sort by amount (largest first) to handle largest debts first
+    debtors.sort(key=lambda x: x[1], reverse=True)
+    creditors.sort(key=lambda x: x[1], reverse=True)
+
     # Iterate until all debts are settled
     while debtors and creditors:
         debtor, debt_amount = debtors.pop(0)
@@ -168,11 +208,108 @@ def simplify_debts(net_balances):
 
         # Re-add debtor or creditor to the list if they still owe money or are still owed money
         if debt_amount > 0.01:  # Use small threshold to avoid floating point issues
-            debtors.insert(0, (debtor, debt_amount))
+            # Re-insert maintaining sort order
+            i = 0
+            while i < len(debtors) and debtors[i][1] > debt_amount:
+                i += 1
+            debtors.insert(i, (debtor, debt_amount))
         if credit_amount > 0.01:  # Use small threshold to avoid floating point issues
-            creditors.insert(0, (creditor, credit_amount))
+            # Re-insert maintaining sort order
+            i = 0
+            while i < len(creditors) and creditors[i][1] > credit_amount:
+                i += 1
+            creditors.insert(i, (creditor, credit_amount))
 
     return simplified_debts
+
+# Function to create a comprehensive report
+def create_report(file_name, net_balances, simplified_debts, person_payments, personal_item_costs):
+    # Create output file name based on input file name
+    file_base = os.path.splitext(os.path.basename(file_name))[0]
+    report_file = f"{file_base}_report.txt"
+    
+    # Open file for writing
+    with open(report_file, 'w', encoding='utf-8') as f:
+        # Write report header
+        f.write(f"Expense Report for {file_base}\n")
+        f.write(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        
+        # Net balances section
+        f.write("===== NET BALANCES =====\n")
+        for person, balance in sorted(net_balances.items()):
+            if balance > 0:
+                f.write(f"{person} is owed {balance:.2f} DKK\n")
+            elif balance < 0:
+                f.write(f"{person} owes {abs(balance):.2f} DKK\n")
+            else:
+                f.write(f"{person} is settled up\n")
+        
+        # Who owes what to whom section
+        f.write("\n===== WHO OWES WHAT TO WHOM =====\n")
+        
+        # Group debts by debtor
+        debtor_to_creditors = {}
+        for debtor, creditor, amount in simplified_debts:
+            if debtor not in debtor_to_creditors:
+                debtor_to_creditors[debtor] = []
+            debtor_to_creditors[debtor].append((creditor, amount))
+        
+        for debtor in sorted(debtor_to_creditors.keys()):
+            total_debt = sum(amount for _, amount in debtor_to_creditors[debtor])
+            f.write(f"\n{debtor} owes a total of {total_debt:.2f} DKK:\n")
+            for creditor, amount in debtor_to_creditors[debtor]:
+                f.write(f"  → {amount:.2f} DKK to {creditor}\n")
+        
+        # Person summaries section
+        f.write("\n===== PERSON SUMMARIES =====\n")
+        
+        # Get all unique people
+        all_people = set()
+        if person_payments:
+            all_people.update(person_payments.keys())
+        if personal_item_costs:
+            all_people.update(personal_item_costs.keys())
+        
+        for person in sorted(all_people):
+            f.write(f"\n{person}'s Summary\n")
+            f.write("------------------------\n")
+            
+            # Print payments made by the person
+            total_paid = 0
+            if person in person_payments:
+                f.write(f"Expenses Paid:\n")
+                for desc, amount in person_payments[person]:
+                    f.write(f"- {desc}: {amount:.2f} DKK\n")
+                    total_paid += amount
+                f.write(f"Total Paid: {total_paid:.2f} DKK\n")
+            else:
+                f.write("Expenses Paid: None\n")
+            
+            # Print shares/items the person owes
+            total_share = 0
+            if person in personal_item_costs:
+                f.write(f"\nShares:\n")
+                for desc, share, total in personal_item_costs[person]:
+                    f.write(f"- {desc}: {share:.2f} DKK of {total:.2f} DKK\n")
+                    total_share += share
+                f.write(f"Total Share: {total_share:.2f} DKK\n")
+            else:
+                f.write("\nShares: None\n")
+            
+            # Print net balance
+            if person in net_balances:
+                balance = net_balances[person]
+                f.write(f"\nNet Balance: {balance:.2f} DKK\n")
+                if balance > 0:
+                    f.write(f"{person} is owed {balance:.2f} DKK\n")
+                elif balance < 0:
+                    f.write(f"{person} owes {abs(balance):.2f} DKK\n")
+                else:
+                    f.write(f"{person} is settled up\n")
+            f.write("------------------------\n")
+    
+    print(f"Report created: {report_file}")
+    return report_file
 
 # Function to select an Excel file for processing
 def select_file():
@@ -202,23 +339,18 @@ def main():
         return
         
     individual_expenses = calculate_individual_expenses(df)
-    total_shares = calculate_total_shares(df)
+    person_payments = track_person_payments(df)
+    total_shares, personal_item_costs = calculate_total_shares(df)
     net_balances = calculate_net_balances(individual_expenses, total_shares)
     simplified_debts = simplify_debts(net_balances)
 
-    print("\nNet Balances in DKK:")
-    for person, balance in net_balances.items():
-        if balance > 0:
-            print(f"{person} is owed {balance:.2f} DKK")
-        elif balance < 0:
-            print(f"{person} owes {abs(balance):.2f} DKK")
-        else:
-            print(f"{person} is settled up")
-
-    # Print simplified debts
-    print("\nSimplified Debts:")
-    for debtor, creditor, amount in simplified_debts:
-        print(f"{debtor} owes {creditor} {amount:.2f} DKK")
+    # Create a comprehensive report
+    report_file = create_report(file_name, net_balances, simplified_debts, person_payments, personal_item_costs)
+    
+    # Also print the report to the console
+    print("\nReport contents:")
+    with open(report_file, 'r', encoding='utf-8') as f:
+        print(f.read())
 
 if __name__ == "__main__":
     main()
